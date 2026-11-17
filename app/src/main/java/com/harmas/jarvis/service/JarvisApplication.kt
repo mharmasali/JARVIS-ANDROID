@@ -2,6 +2,7 @@ package com.harmas.jarvis.service
 
 import android.app.Application
 import com.harmas.jarvis.core.JarvisCore
+import com.harmas.jarvis.engine.EngineBootstrap
 
 class JarvisApplication : Application() {
 
@@ -12,7 +13,10 @@ class JarvisApplication : Application() {
     override fun onCreate() {
         super.onCreate()
 
-        // Initialize the core when first accessed.
-        // Heavy AI models will not load automatically.
+        // Initialize the central JARVIS system.
+        jarvisCore
+
+        // Register the configured AI engine.
+        EngineBootstrap.initialize()
     }
 }
