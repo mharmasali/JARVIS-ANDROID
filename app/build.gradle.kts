@@ -3,6 +3,24 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+val aiBaseUrl = providers.gradleProperty("JARVIS_AI_BASE_URL")
+    .orElse("")
+    .get()
+
+val aiApiKey = providers.gradleProperty("JARVIS_AI_API_KEY")
+    .orElse("")
+    .get()
+
+val aiModel = providers.gradleProperty("JARVIS_AI_MODEL")
+    .orElse("")
+    .get()
+
+fun escapeConfigValue(value: String): String {
+    return value
+        .replace("\\", "\\\\")
+        .replace("\"", "\\\"")
+}
+
 android {
     namespace = "com.harmas.jarvis"
     compileSdk = 35
@@ -14,6 +32,24 @@ android {
 
         versionCode = 1
         versionName = "1.0"
+
+        buildConfigField(
+            "String",
+            "JARVIS_AI_BASE_URL",
+            "\"${escapeConfigValue(aiBaseUrl)}\""
+        )
+
+        buildConfigField(
+            "String",
+            "JARVIS_AI_API_KEY",
+            "\"${escapeConfigValue(aiApiKey)}\""
+        )
+
+        buildConfigField(
+            "String",
+            "JARVIS_AI_MODEL",
+            "\"${escapeConfigValue(aiModel)}\""
+        )
     }
 
     compileOptions {
