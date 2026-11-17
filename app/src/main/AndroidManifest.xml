@@ -1,17 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Internet and microphone -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
-
-    <!-- Notifications -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-
-    <!-- Foreground service foundation -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
 
-    <!-- Supported app visibility -->
     <queries>
         <package android:name="com.google.android.youtube" />
         <package android:name="com.instagram.android" />
@@ -22,6 +16,7 @@
     </queries>
 
     <application
+        android:name=".service.JarvisApplication"
         android:allowBackup="true"
         android:label="J.A.R.V.I.S"
         android:theme="@style/Theme.Jarvis"
@@ -38,7 +33,6 @@
 
         </activity>
 
-        <!-- Accessibility service -->
         <service
             android:name=".accessibility.JarvisAccessibilityService"
             android:label="J.A.R.V.I.S Accessibility"
