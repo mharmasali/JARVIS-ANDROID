@@ -4,10 +4,13 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.view.Gravity
 import android.widget.Button
 import android.widget.LinearLayout
@@ -16,8 +19,14 @@ import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
+import com.harmas.jarvis.core.ChatMessage
 import com.harmas.jarvis.core.JarvisCore
+import com.harmas.jarvis.core.MessageRole
+import com.harmas.jarvis.engine.InferenceRequest
+import com.harmas.jarvis.intelligence.RoutingMode
 import com.harmas.jarvis.service.JarvisApplication
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -28,13 +37,19 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private lateinit var status: TextView
     private lateinit var response: TextView
     private lateinit var micButton: Button
+    private lateinit var engineStatus: TextView
 
     private var speechRecognizer: SpeechRecognizer? = null
     private var textToSpeech: TextToSpeech? = null
+
     private var ttsReady = false
+    private var continuousListening = false
+    private var processing = false
+
+    private val handler = Handler(Looper.getMainLooper())
 
     private val cyan = 0xFF00D9FF.toInt()
-    private val background = 0xFF080F18.toInt()
+    private val screenBackground = 0xFF080F18.toInt()
     private val surface = 0xFF101D2B.toInt()
     private val white = 0xFFF2FAFF.toInt()
     private val muted = 0xFF9CB3C7.toInt()
@@ -43,6 +58,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         super.onCreate(savedInstanceState)
 
         core = (application as JarvisApplication).jarvisCore
+
+        // Prefer the configured cloud AI engine.
+        core.aiRouter.routingMode = RoutingMode.CLOUD_ONLY
+
         textToSpeech = TextToSpeech(this, this)
 
         createDashboard()
@@ -52,7 +71,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(24, 30, 24, 20)
-            setBackgroundColor(this@MainActivity.background)
+            setBackgroundColor(screenBackground)
         }
 
         val scroll = ScrollView(this)
@@ -77,9 +96,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
 
         status = TextView(this).apply {
-            text = "SYSTEM ONLINE • DASHBOARD READY"
+            text = "INITIALIZING GEMINI..."
             textSize = 12f
-            setTextColor(0xFF28D17C.toInt())
+            setTextColor(0xFFFFB547.toInt())
             gravity = Gravity.CENTER
             setPadding(8, 28, 8, 20)
         }
@@ -100,7 +119,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
 
         response = TextView(this).apply {
-            text = "Hello, sir. How can I help you?"
+            text = "Hello, sir. Ask me anything."
             textSize = 16f
             setTextColor(white)
             gravity = Gravity.CENTER
@@ -109,18 +128,26 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
 
         micButton = Button(this).apply {
-            text = "START VOICE INPUT"
-            setTextColor(this@MainActivity.background)
+            text = "START LISTENING"
+            setTextColor(screenBackground)
             setBackgroundColor(cyan)
+
             setOnClickListener {
-                startVoiceInput()
+                if (continuousListening) {
+                    stopListening()
+                } else {
+                    requestMicrophonePermission()
+                }
             }
         }
 
         val time = TextView(this).apply {
             text = "LOCAL TIME: " +
-                SimpleDateFormat("hh:mm a", Locale.getDefault())
-                    .format(Date())
+                SimpleDateFormat(
+                    "hh:mm a",
+                    Locale.getDefault()
+                ).format(Date())
+
             textSize = 13f
             setTextColor(muted)
             gravity = Gravity.CENTER
@@ -128,16 +155,14 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
 
         val memory = TextView(this).apply {
-            text = "MEMORY: INITIALIZED"
+            text = "MEMORY: LOCAL DATABASE"
             textSize = 13f
             setTextColor(cyan)
             gravity = Gravity.CENTER
             setPadding(8, 8, 8, 8)
         }
 
-        val engines = TextView(this).apply {
-            text = "REGISTERED AI ENGINES: " +
-                core.getStatus()["registeredEngines"]
+        engineStatus = TextView(this).apply {
             textSize = 13f
             setTextColor(muted)
             gravity = Gravity.CENTER
@@ -153,7 +178,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         content.addView(micButton)
         content.addView(time)
         content.addView(memory)
-        content.addView(engines)
+        content.addView(engineStatus)
 
         scroll.addView(content)
 
@@ -167,9 +192,23 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         )
 
         setContentView(root)
+
+        refreshEngineStatus()
     }
 
-    private fun startVoiceInput() {
+    private fun refreshEngineStatus() {
+        val count = core.getStatus()["registeredEngines"] as? Int ?: 0
+
+        engineStatus.text = "REGISTERED AI ENGINES: $count"
+
+        status.text = if (count > 0) {
+            "GEMINI ENGINE CONFIGURED"
+        } else {
+            "GEMINI NOT CONFIGURED"
+        }
+    }
+
+    private fun requestMicrophonePermission() {
         if (
             ContextCompat.checkSelfPermission(
                 this,
@@ -184,54 +223,90 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             return
         }
 
+        continuousListening = true
+        processing = false
+        micButton.text = "STOP LISTENING"
+
+        startListeningSession()
+    }
+
+    private fun startListeningSession() {
+        if (
+            !continuousListening ||
+            processing ||
+            isFinishing ||
+            isDestroyed
+        ) return
+
         if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-            response.text = "Speech recognition is not available."
+            status.text = "SPEECH RECOGNITION UNAVAILABLE"
+            stopListening()
             return
         }
 
         try {
             speechRecognizer?.destroy()
-            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
+
+            speechRecognizer =
+                SpeechRecognizer.createSpeechRecognizer(this)
 
             speechRecognizer?.setRecognitionListener(
                 object : RecognitionListener {
 
                     override fun onReadyForSpeech(params: Bundle?) {
-                        status.text = "LISTENING..."
-                        micButton.text = "LISTENING..."
+                        if (continuousListening) {
+                            status.text = "LISTENING..."
+                        }
                     }
 
-                    override fun onBeginningOfSpeech() {}
+                    override fun onBeginningOfSpeech() {
+                        status.text = "HEARING YOU..."
+                    }
+
                     override fun onRmsChanged(rmsdB: Float) {}
                     override fun onBufferReceived(buffer: ByteArray?) {}
 
                     override fun onEndOfSpeech() {
-                        status.text = "PROCESSING..."
-                        micButton.text = "START VOICE INPUT"
+                        status.text = "PROCESSING SPEECH..."
                     }
 
                     override fun onError(error: Int) {
-                        status.text = "VOICE INPUT ERROR"
-                        micButton.text = "TRY AGAIN"
-                        response.text = "Please try speaking again."
+                        if (continuousListening && !processing) {
+                            status.text = "RESTARTING LISTENING..."
+
+                            handler.postDelayed(
+                                { startListeningSession() },
+                                1000
+                            )
+                        }
                     }
 
                     override fun onResults(results: Bundle?) {
-                        val matches = results?.getStringArrayList(
-                            SpeechRecognizer.RESULTS_RECOGNITION
-                        )
+                        val spoken = results
+                            ?.getStringArrayList(
+                                SpeechRecognizer.RESULTS_RECOGNITION
+                            )
+                            ?.firstOrNull()
+                            .orEmpty()
 
-                        val spoken = matches?.firstOrNull().orEmpty()
-
-                        if (spoken.isNotBlank()) {
-                            processCommand(spoken)
+                        if (spoken.isNotBlank() && continuousListening) {
+                            handleUserMessage(spoken)
+                        } else if (continuousListening) {
+                            handler.postDelayed(
+                                { startListeningSession() },
+                                500
+                            )
                         }
-
-                        micButton.text = "START VOICE INPUT"
                     }
 
-                    override fun onPartialResults(partialResults: Bundle?) {}
-                    override fun onEvent(eventType: Int, params: Bundle?) {}
+                    override fun onPartialResults(
+                        partialResults: Bundle?
+                    ) {}
+
+                    override fun onEvent(
+                        eventType: Int,
+                        params: Bundle?
+                    ) {}
                 }
             )
 
@@ -242,69 +317,230 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     RecognizerIntent.EXTRA_LANGUAGE_MODEL,
                     RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
                 )
+
                 putExtra(
                     RecognizerIntent.EXTRA_LANGUAGE,
                     Locale.getDefault().toLanguageTag()
                 )
-                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+
+                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
             }
 
             speechRecognizer?.startListening(intent)
 
         } catch (e: Exception) {
-            status.text = "VOICE INPUT UNAVAILABLE"
-            response.text = e.localizedMessage ?: "Unknown error"
+            status.text = "VOICE ERROR"
+            handler.postDelayed(
+                { startListeningSession() },
+                1200
+            )
         }
     }
 
-    private fun processCommand(command: String) {
-        val normalized = command.lowercase(Locale.ROOT)
+    private fun stopListening() {
+        continuousListening = false
+        processing = false
 
-        val answer = when {
-            normalized.contains("hello") ||
-                normalized.contains("salam") ->
-                "Hello, sir. How can I help you?"
+        handler.removeCallbacksAndMessages(null)
 
-            normalized.contains("who are you") ->
-                "I am J.A.R.V.I.S, your personal Android assistant."
+        speechRecognizer?.cancel()
 
-            normalized.contains("time") ->
-                "The time is " +
-                    SimpleDateFormat("hh:mm a", Locale.getDefault())
-                        .format(Date())
+        micButton.text = "START LISTENING"
+        status.text = "SYSTEM READY"
+    }
 
-            normalized.contains("stop") ->
-                "Voice command stopped, sir."
+    private fun handleUserMessage(userText: String) {
+        val normalized = userText.lowercase(Locale.ROOT).trim()
 
-            else ->
-                "Command received, sir. AI conversation integration is pending."
+        if (
+            normalized == "stop listening" ||
+            normalized == "stop jarvis" ||
+            normalized == "jarvis stop"
+        ) {
+            stopListening()
+            speak("Listening stopped, sir.")
+            return
         }
 
-        response.text = "YOU: $command\n\nJ.A.R.V.I.S: $answer"
-        status.text = "SYSTEM READY"
-        speak(answer)
+        if (normalized.startsWith("remember my name is ")) {
+            val name = userText
+                .substringAfter("remember my name is ")
+                .trim()
+
+            if (name.isNotBlank()) {
+                core.memoryManager.remember(
+                    "user_name",
+                    name,
+                    "personal"
+                )
+
+                response.text =
+                    "YOU: $userText\n\nJ.A.R.V.I.S: I will remember your name, $name."
+
+                speak("I will remember your name, $name, sir.")
+                return
+            }
+        }
+
+        if (
+            normalized.contains("what is my name") ||
+            normalized.contains("who am i")
+        ) {
+            val name = core.memoryManager.recall("user_name")
+
+            val answer = if (name.isNullOrBlank()) {
+                "You have not told me your name yet, sir."
+            } else {
+                "Your name is $name, sir."
+            }
+
+            response.text =
+                "YOU: $userText\n\nJ.A.R.V.I.S: $answer"
+
+            speak(answer)
+            return
+        }
+
+        askGemini(userText)
+    }
+
+    private fun askGemini(userText: String) {
+        processing = true
+        status.text = "GEMINI IS THINKING..."
+
+        response.text =
+            "YOU: $userText\n\nJ.A.R.V.I.S: Thinking..."
+
+        lifecycleScope.launch {
+            try {
+                val previousMessages =
+                    core.conversationRepository.getRecent(12)
+
+                val memoryContext =
+                    core.memoryManager.buildContext(20)
+
+                val systemMessage = ChatMessage(
+                    role = MessageRole.SYSTEM,
+                    content = """
+                        You are J.A.R.V.I.S, Just A Rather Very Intelligent System.
+                        You are a personal Android assistant.
+                        Address the user respectfully as sir.
+                        Understand English, Urdu and Roman Urdu.
+                        Reply naturally and clearly.
+                        Keep normal answers concise.
+                        Never claim an Android action was completed unless
+                        an actual connected tool performed it.
+
+                        Saved memory:
+                        ${memoryContext.ifBlank { "No saved memories." }}
+                    """.trimIndent()
+                )
+
+                val userMessage = ChatMessage(
+                    role = MessageRole.USER,
+                    content = userText
+                )
+
+                val messages = buildList {
+                    add(systemMessage)
+                    addAll(
+                        previousMessages.filter {
+                            it.role == MessageRole.USER ||
+                                it.role == MessageRole.ASSISTANT
+                        }
+                    )
+                    add(userMessage)
+                }
+
+                core.conversationRepository.save(userMessage)
+
+                val result = core.aiRouter.generate(
+                    InferenceRequest(
+                        messages = messages
+                    )
+                )
+
+                val assistantMessage = ChatMessage(
+                    role = MessageRole.ASSISTANT,
+                    content = result.content
+                )
+
+                core.conversationRepository.save(assistantMessage)
+
+                response.text =
+                    "YOU: $userText\n\nJ.A.R.V.I.S: ${result.content}"
+
+                status.text = "GEMINI RESPONSE RECEIVED"
+
+                speak(result.content)
+
+            } catch (e: Exception) {
+                val error = e.message ?: "Unknown Gemini error"
+
+                response.text =
+                    "YOU: $userText\n\nJ.A.R.V.I.S: $error"
+
+                status.text = "GEMINI CONNECTION ERROR"
+
+                speak("I could not connect to Gemini, sir.")
+            } finally {
+                processing = false
+                refreshEngineStatus()
+            }
+        }
     }
 
     private fun speak(message: String) {
-        if (ttsReady) {
-            textToSpeech?.speak(
-                message,
-                TextToSpeech.QUEUE_FLUSH,
-                null,
-                "JARVIS_REPLY"
+        if (!ttsReady) {
+            resumeListeningAfterReply()
+            return
+        }
+
+        textToSpeech?.speak(
+            message,
+            TextToSpeech.QUEUE_FLUSH,
+            null,
+            "JARVIS_REPLY"
+        )
+    }
+
+    private fun resumeListeningAfterReply() {
+        if (continuousListening && !processing) {
+            handler.postDelayed(
+                { startListeningSession() },
+                900
             )
         }
     }
 
     override fun onInit(result: Int) {
         if (result == TextToSpeech.SUCCESS) {
-            val languageResult = textToSpeech?.setLanguage(
-                Locale.getDefault()
-            )
+            val languageResult =
+                textToSpeech?.setLanguage(Locale.US)
 
             ttsReady =
                 languageResult != TextToSpeech.LANG_MISSING_DATA &&
                 languageResult != TextToSpeech.LANG_NOT_SUPPORTED
+
+            textToSpeech?.setOnUtteranceProgressListener(
+                object : UtteranceProgressListener() {
+
+                    override fun onStart(utteranceId: String?) {}
+
+                    override fun onDone(utteranceId: String?) {
+                        handler.post {
+                            resumeListeningAfterReply()
+                        }
+                    }
+
+                    @Deprecated("Deprecated in Java")
+                    override fun onError(utteranceId: String?) {
+                        handler.post {
+                            resumeListeningAfterReply()
+                        }
+                    }
+                }
+            )
         }
     }
 
@@ -324,11 +560,14 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             grantResults.isNotEmpty() &&
             grantResults[0] == PackageManager.PERMISSION_GRANTED
         ) {
-            startVoiceInput()
+            requestMicrophonePermission()
         }
     }
 
     override fun onDestroy() {
+        continuousListening = false
+        handler.removeCallbacksAndMessages(null)
+
         speechRecognizer?.destroy()
         speechRecognizer = null
 
