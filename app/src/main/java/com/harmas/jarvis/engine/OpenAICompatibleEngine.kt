@@ -1,10 +1,6 @@
 package com.harmas.jarvis.engine
 
 import com.harmas.jarvis.core.MessageRole
-import com.harmas.jarvis.engine.InferenceEngine
-import com.harmas.jarvis.engine.InferenceRequest
-import com.harmas.jarvis.engine.InferenceResponse
-import com.harmas.jarvis.engine.EngineStatus
 import com.harmas.jarvis.intelligence.ModelSpec
 import org.json.JSONArray
 import org.json.JSONObject
@@ -21,7 +17,7 @@ class OpenAICompatibleEngine(
     private val defaultModel: String
 ) : InferenceEngine {
 
-    override val id = "openai-compatible"
+    override val id = "gemini-api"
 
     private val executor = Executors.newCachedThreadPool()
 
@@ -30,9 +26,9 @@ class OpenAICompatibleEngine(
             ModelSpec(
                 id = defaultModel,
                 name = defaultModel,
-                provider = "OpenAI-compatible",
+                provider = "Google Gemini",
                 local = false,
-                capabilities = setOf("chat", "tools")
+                capabilities = setOf("chat")
             )
         )
     }
@@ -42,100 +38,206 @@ class OpenAICompatibleEngine(
     ): InferenceResponse = suspendCoroutine { continuation ->
 
         executor.execute {
+            var connection: HttpURLConnection? = null
+
             try {
-                val messages = JSONArray()
+                val contents = JSONArray()
+                val systemInstructions = JSONArray()
 
                 request.messages.forEach { message ->
-                    messages.put(
-                        JSONObject().apply {
-                            put("role", message.role.name.lowercase())
-                            put("content", message.content)
+
+                    if (message.content.isBlank()) {
+                        return@forEach
+                    }
+
+                    if (message.role == MessageRole.SYSTEM) {
+                        systemInstructions.put(
+                            JSONObject().put("text", message.content)
+                        )
+                    } else {
+                        val role = when (message.role) {
+                            MessageRole.ASSISTANT -> "model"
+                            MessageRole.USER -> "user"
+                            MessageRole.TOOL -> "user"
+                            MessageRole.SYSTEM -> "user"
                         }
-                    )
+
+                        contents.put(
+                            JSONObject().apply {
+                                put("role", role)
+                                put(
+                                    "parts",
+                                    JSONArray().put(
+                                        JSONObject().put(
+                                            "text",
+                                            message.content
+                                        )
+                                    )
+                                )
+                            }
+                        )
+                    }
+                }
+
+                require(contents.length() > 0) {
+                    "No user messages were provided."
                 }
 
                 val model = request.modelId ?: defaultModel
 
                 val body = JSONObject().apply {
-                    put("model", model)
-                    put("messages", messages)
-                    put("temperature", request.config.temperature)
-                    put("max_tokens", request.config.maxTokens)
-                    put("top_p", request.config.topP)
-                }
 
-                val connection = URL(
-                    "${baseUrl.trimEnd('/')}/chat/completions"
-                ).openConnection() as HttpURLConnection
+                    put("contents", contents)
 
-                try {
-                    connection.requestMethod = "POST"
-                    connection.connectTimeout = 15000
-                    connection.readTimeout = 60000
-                    connection.doOutput = true
-                    connection.setRequestProperty(
-                        "Content-Type",
-                        "application/json"
-                    )
-
-                    if (apiKey.isNotBlank()) {
-                        connection.setRequestProperty(
-                            "Authorization",
-                            "Bearer $apiKey"
+                    if (systemInstructions.length() > 0) {
+                        put(
+                            "systemInstruction",
+                            JSONObject().put(
+                                "parts",
+                                systemInstructions
+                            )
                         )
                     }
 
-                    connection.outputStream.use {
-                        it.write(body.toString().toByteArray(Charsets.UTF_8))
-                    }
-
-                    val status = connection.responseCode
-
-                    val responseText = (
-                        if (status in 200..299) {
-                            connection.inputStream
-                        } else {
-                            connection.errorStream
+                    put(
+                        "generationConfig",
+                        JSONObject().apply {
+                            put(
+                                "temperature",
+                                request.config.temperature.toDouble()
+                            )
+                            put(
+                                "maxOutputTokens",
+                                request.config.maxTokens
+                            )
+                            put(
+                                "topP",
+                                request.config.topP.toDouble()
+                            )
                         }
-                    )?.bufferedReader()?.use { it.readText() }
-                        ?: throw IllegalStateException("Empty server response")
+                    )
+                }
 
-                    if (status !in 200..299) {
-                        throw IllegalStateException(
-                            "AI server returned HTTP $status: $responseText"
-                        )
+                val endpoint =
+                    "${baseUrl.trimEnd('/')}/models/$model:generateContent"
+
+                connection = URL(endpoint)
+                    .openConnection() as HttpURLConnection
+
+                connection.requestMethod = "POST"
+                connection.connectTimeout = 20000
+                connection.readTimeout = 90000
+                connection.doOutput = true
+
+                connection.setRequestProperty(
+                    "Content-Type",
+                    "application/json"
+                )
+
+                connection.setRequestProperty(
+                    "x-goog-api-key",
+                    apiKey
+                )
+
+                connection.outputStream.use { output ->
+                    output.write(
+                        body.toString().toByteArray(Charsets.UTF_8)
+                    )
+                }
+
+                val status = connection.responseCode
+
+                val responseText = (
+                    if (status in 200..299) {
+                        connection.inputStream
+                    } else {
+                        connection.errorStream
                     }
+                )?.bufferedReader()?.use {
+                    it.readText()
+                } ?: throw IllegalStateException(
+                    "Gemini returned an empty response."
+                )
 
-                    val json = JSONObject(responseText)
-                    val choices = json.getJSONArray("choices")
-                    val content = choices
-                        .getJSONObject(0)
-                        .getJSONObject("message")
-                        .optString("content")
+                if (status !in 200..299) {
+                    val details = runCatching {
+                        JSONObject(responseText)
+                            .optJSONObject("error")
+                            ?.optString("message")
+                    }.getOrNull()
 
-                    continuation.resume(
-                        InferenceResponse(
-                            content = content,
-                            modelId = model
-                        )
+                    throw IllegalStateException(
+                        "Gemini API HTTP $status: " +
+                            (details ?: responseText)
+                    )
+                }
+
+                val json = JSONObject(responseText)
+
+                val candidates = json.optJSONArray("candidates")
+                    ?: throw IllegalStateException(
+                        "Gemini returned no candidates: $responseText"
                     )
 
-                } finally {
-                    connection.disconnect()
+                if (candidates.length() == 0) {
+                    throw IllegalStateException(
+                        "Gemini did not return an answer. " +
+                            "The request may have been blocked."
+                    )
                 }
+
+                val parts = candidates
+                    .getJSONObject(0)
+                    .getJSONObject("content")
+                    .getJSONArray("parts")
+
+                val answer = buildString {
+                    for (index in 0 until parts.length()) {
+                        val part = parts.getJSONObject(index)
+                        val text = part.optString("text")
+
+                        if (text.isNotBlank()) {
+                            if (isNotEmpty()) append("\n")
+                            append(text)
+                        }
+                    }
+                }.trim()
+
+                if (answer.isBlank()) {
+                    throw IllegalStateException(
+                        "Gemini returned no text answer."
+                    )
+                }
+
+                continuation.resume(
+                    InferenceResponse(
+                        content = answer,
+                        modelId = model
+                    )
+                )
 
             } catch (exception: Exception) {
                 continuation.resumeWithException(exception)
+            } finally {
+                connection?.disconnect()
             }
         }
     }
 
     override suspend fun healthCheck(): EngineStatus {
+        val configured =
+            baseUrl.startsWith("https://") &&
+            apiKey.isNotBlank() &&
+            defaultModel.isNotBlank()
+
         return EngineStatus(
             engineId = id,
-            available = baseUrl.startsWith("https://") ||
-                baseUrl.startsWith("http://"),
-            message = "Endpoint configured; connection not yet verified."
+            available = configured,
+            message = if (configured) {
+                "Gemini API settings configured. Live connection is checked during a request."
+            } else {
+                "Gemini API configuration is incomplete."
+            }
         )
     }
 }
