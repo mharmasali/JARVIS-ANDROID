@@ -8,8 +8,7 @@ import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
-import android.view.Gravity
-import android.view.View
+import.view.Gravity
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -18,6 +17,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.harmas.jarvis.core.JarvisCore
+import com.harmas.jarvis.service.JarvisApplication
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -42,8 +42,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        core = (application as com.harmas.jarvis.service.JarvisApplication)
-            .jarvisCore
+        core = (application as JarvisApplication).jarvisCore
 
         textToSpeech = TextToSpeech(this, this)
 
@@ -54,10 +53,11 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(24, 30, 24, 20)
-            setBackgroundColor(background)
+            setBackgroundColor(this@MainActivity.background)
         }
 
         val scroll = ScrollView(this)
+
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
@@ -111,8 +111,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
         micButton = Button(this).apply {
             text = "START VOICE INPUT"
-            setTextColor(background)
+            setTextColor(this@MainActivity.background)
             setBackgroundColor(cyan)
+
             setOnClickListener {
                 startVoiceInput()
             }
@@ -122,6 +123,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             text = "LOCAL TIME: " +
                 SimpleDateFormat("hh:mm a", Locale.getDefault())
                     .format(Date())
+
             textSize = 13f
             setTextColor(muted)
             gravity = Gravity.CENTER
@@ -139,6 +141,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         val engines = TextView(this).apply {
             text = "REGISTERED AI ENGINES: " +
                 core.getStatus()["registeredEngines"]
+
             textSize = 13f
             setTextColor(muted)
             gravity = Gravity.CENTER
@@ -157,6 +160,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         content.addView(engines)
 
         scroll.addView(content)
+
         root.addView(
             scroll,
             LinearLayout.LayoutParams(
@@ -191,10 +195,12 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         try {
             speechRecognizer?.destroy()
 
-            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
+            speechRecognizer =
+                SpeechRecognizer.createSpeechRecognizer(this)
 
             speechRecognizer?.setRecognitionListener(
                 object : RecognitionListener {
+
                     override fun onReadyForSpeech(params: Bundle?) {
                         status.text = "LISTENING..."
                         micButton.text = "LISTENING..."
@@ -233,27 +239,38 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
                     override fun onPartialResults(partialResults: Bundle?) {}
 
-                    override fun onEvent(eventType: Int, params: Bundle?) {}
+                    override fun onEvent(
+                        eventType: Int,
+                        params: Bundle?
+                    ) {}
                 }
             )
 
-            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            val intent = Intent(
+                RecognizerIntent.ACTION_RECOGNIZE_SPEECH
+            ).apply {
                 putExtra(
                     RecognizerIntent.EXTRA_LANGUAGE_MODEL,
                     RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
                 )
+
                 putExtra(
                     RecognizerIntent.EXTRA_LANGUAGE,
                     Locale.getDefault().toLanguageTag()
                 )
-                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+
+                putExtra(
+                    RecognizerIntent.EXTRA_MAX_RESULTS,
+                    3
+                )
             }
 
             speechRecognizer?.startListening(intent)
 
         } catch (e: Exception) {
             status.text = "VOICE INPUT UNAVAILABLE"
-            response.text = e.localizedMessage ?: "Unknown error"
+            response.text =
+                e.localizedMessage ?: "Unknown error"
         }
     }
 
@@ -272,8 +289,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
             normalized.contains("time") ->
                 "The time is " +
-                    SimpleDateFormat("hh:mm a", Locale.getDefault())
-                        .format(Date())
+                    SimpleDateFormat(
+                        "hh:mm a",
+                        Locale.getDefault()
+                    ).format(Date())
 
             normalized.contains("stop") ->
                 "Voice command stopped, sir."
@@ -282,8 +301,11 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 "Command received, sir. AI conversation integration is pending."
         }
 
-        response.text = "YOU: $command\n\nJ.A.R.V.I.S: $answer"
+        response.text =
+            "YOU: $command\n\nJ.A.R.V.I.S: $answer"
+
         status.text = "SYSTEM READY"
+
         speak(answer)
     }
 
@@ -303,7 +325,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             val languageResult = textToSpeech?.setLanguage(
                 Locale.getDefault()
             )
-            ttsReady = languageResult != TextToSpeech.LANG_MISSING_DATA &&
+
+            ttsReady =
+                languageResult != TextToSpeech.LANG_MISSING_DATA &&
                 languageResult != TextToSpeech.LANG_NOT_SUPPORTED
         }
     }
@@ -319,7 +343,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             grantResults
         )
 
-        if (requestCode == 100 &&
+        if (
+            requestCode == 100 &&
             grantResults.isNotEmpty() &&
             grantResults[0] == PackageManager.PERMISSION_GRANTED
         ) {
