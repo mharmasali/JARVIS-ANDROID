@@ -43,6 +43,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private var textToSpeech: TextToSpeech? = null
 
     private var ttsReady = false
+    private var ttsSpeaking = false
     private var continuousListening = false
     private var processing = false
 
@@ -58,8 +59,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         super.onCreate(savedInstanceState)
 
         core = (application as JarvisApplication).jarvisCore
-
-        // Prefer the configured cloud AI engine.
         core.aiRouter.routingMode = RoutingMode.CLOUD_ONLY
 
         textToSpeech = TextToSpeech(this, this)
@@ -96,7 +95,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
 
         status = TextView(this).apply {
-            text = "INITIALIZING GEMINI..."
+            text = "INITIALIZING JARVIS..."
             textSize = 12f
             setTextColor(0xFFFFB547.toInt())
             gravity = Gravity.CENTER
@@ -192,19 +191,19 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         )
 
         setContentView(root)
-
         refreshEngineStatus()
     }
 
     private fun refreshEngineStatus() {
-        val count = core.getStatus()["registeredEngines"] as? Int ?: 0
+        val count =
+            core.getStatus()["registeredEngines"] as? Int ?: 0
 
         engineStatus.text = "REGISTERED AI ENGINES: $count"
 
         status.text = if (count > 0) {
-            "GEMINI ENGINE CONFIGURED"
+            "AI ENGINE REGISTERED"
         } else {
-            "GEMINI NOT CONFIGURED"
+            "AI ENGINE NOT CONFIGURED"
         }
     }
 
@@ -225,8 +224,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
         continuousListening = true
         processing = false
-        micButton.text = "STOP LISTENING"
+        ttsSpeaking = false
 
+        micButton.text = "STOP LISTENING"
         startListeningSession()
     }
 
@@ -234,6 +234,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         if (
             !continuousListening ||
             processing ||
+            ttsSpeaking ||
             isFinishing ||
             isDestroyed
         ) return
@@ -245,6 +246,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
 
         try {
+            speechRecognizer?.cancel()
             speechRecognizer?.destroy()
 
             speechRecognizer =
@@ -264,6 +266,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     }
 
                     override fun onRmsChanged(rmsdB: Float) {}
+
                     override fun onBufferReceived(buffer: ByteArray?) {}
 
                     override fun onEndOfSpeech() {
@@ -274,10 +277,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                         if (continuousListening && !processing) {
                             status.text = "RESTARTING LISTENING..."
 
-                            handler.postDelayed(
-                                { startListeningSession() },
-                                1000
-                            )
+                            handler.postDelayed({
+                                startListeningSession()
+                            }, 1000)
                         }
                     }
 
@@ -292,10 +294,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                         if (spoken.isNotBlank() && continuousListening) {
                             handleUserMessage(spoken)
                         } else if (continuousListening) {
-                            handler.postDelayed(
-                                { startListeningSession() },
-                                500
-                            )
+                            handler.postDelayed({
+                                startListeningSession()
+                            }, 500)
                         }
                     }
 
@@ -323,23 +324,27 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     Locale.getDefault().toLanguageTag()
                 )
 
-                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+                putExtra(
+                    RecognizerIntent.EXTRA_MAX_RESULTS,
+                    1
+                )
             }
 
             speechRecognizer?.startListening(intent)
 
         } catch (e: Exception) {
-            status.text = "VOICE ERROR"
-            handler.postDelayed(
-                { startListeningSession() },
-                1200
-            )
+            status.text = "VOICE ERROR: ${e.message ?: "UNKNOWN"}"
+
+            handler.postDelayed({
+                startListeningSession()
+            }, 1200)
         }
     }
 
     private fun stopListening() {
         continuousListening = false
         processing = false
+        ttsSpeaking = false
 
         handler.removeCallbacksAndMessages(null)
 
@@ -350,7 +355,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     private fun handleUserMessage(userText: String) {
-        val normalized = userText.lowercase(Locale.ROOT).trim()
+        val normalized = userText
+            .lowercase(Locale.ROOT)
+            .trim()
 
         if (
             normalized == "stop listening" ||
@@ -362,10 +369,13 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             return
         }
 
-        if (normalized.startsWith("remember my name is ")) {
-            val name = userText
-                .substringAfter("remember my name is ")
-                .trim()
+        val nameMatch = Regex(
+            "^remember\\s+my\\s+name\\s+is\\s+(.+)$",
+            RegexOption.IGNORE_CASE
+        ).find(userText.trim())
+
+        if (nameMatch != null) {
+            val name = nameMatch.groupValues[1].trim()
 
             if (name.isNotBlank()) {
                 core.memoryManager.remember(
@@ -374,17 +384,21 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     "personal"
                 )
 
-                response.text =
-                    "YOU: $userText\n\nJ.A.R.V.I.S: I will remember your name, $name."
+                val answer = "I will remember your name, $name."
 
-                speak("I will remember your name, $name, sir.")
+                response.text =
+                    "YOU: $userText\n\nJ.A.R.V.I.S: $answer"
+
+                speak("$answer, sir.")
                 return
             }
         }
 
         if (
             normalized.contains("what is my name") ||
-            normalized.contains("who am i")
+            normalized.contains("what's my name") ||
+            normalized.contains("who am i") ||
+            normalized.contains("mera naam kya hai")
         ) {
             val name = core.memoryManager.recall("user_name")
 
@@ -401,12 +415,31 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             return
         }
 
+        if (
+            normalized == "what do you remember" ||
+            normalized == "show my memories"
+        ) {
+            val memories = core.memoryManager.buildContext(20)
+
+            val answer = if (memories.isBlank()) {
+                "I do not have any saved memories yet, sir."
+            } else {
+                "Here is what I remember. $memories"
+            }
+
+            response.text =
+                "YOU: $userText\n\nJ.A.R.V.I.S: $answer"
+
+            speak(answer)
+            return
+        }
+
         askGemini(userText)
     }
 
     private fun askGemini(userText: String) {
         processing = true
-        status.text = "GEMINI IS THINKING..."
+        status.text = "AI IS THINKING..."
 
         response.text =
             "YOU: $userText\n\nJ.A.R.V.I.S: Thinking..."
@@ -443,21 +476,21 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
                 val messages = buildList {
                     add(systemMessage)
+
                     addAll(
                         previousMessages.filter {
                             it.role == MessageRole.USER ||
                                 it.role == MessageRole.ASSISTANT
                         }
                     )
+
                     add(userMessage)
                 }
 
                 core.conversationRepository.save(userMessage)
 
                 val result = core.aiRouter.generate(
-                    InferenceRequest(
-                        messages = messages
-                    )
+                    InferenceRequest(messages = messages)
                 )
 
                 val assistantMessage = ChatMessage(
@@ -470,21 +503,27 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 response.text =
                     "YOU: $userText\n\nJ.A.R.V.I.S: ${result.content}"
 
-                status.text = "GEMINI RESPONSE RECEIVED"
+                status.text = "AI RESPONSE RECEIVED"
 
                 speak(result.content)
 
             } catch (e: Exception) {
-                val error = e.message ?: "Unknown Gemini error"
+                val error = e.message ?: "Unknown connection error"
 
                 response.text =
                     "YOU: $userText\n\nJ.A.R.V.I.S: $error"
 
-                status.text = "GEMINI CONNECTION ERROR"
+                status.text = "AI CONNECTION ERROR"
 
-                speak("I could not connect to Gemini, sir.")
+                speak("I could not connect to the AI service, sir.")
+
             } finally {
                 processing = false
+
+                if (!ttsSpeaking) {
+                    resumeListeningAfterReply()
+                }
+
                 refreshEngineStatus()
             }
         }
@@ -492,24 +531,37 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     private fun speak(message: String) {
         if (!ttsReady) {
+            ttsSpeaking = false
             resumeListeningAfterReply()
             return
         }
 
-        textToSpeech?.speak(
+        ttsSpeaking = true
+
+        val result = textToSpeech?.speak(
             message,
             TextToSpeech.QUEUE_FLUSH,
             null,
             "JARVIS_REPLY"
         )
+
+        if (result == TextToSpeech.ERROR) {
+            ttsSpeaking = false
+            resumeListeningAfterReply()
+        }
     }
 
     private fun resumeListeningAfterReply() {
-        if (continuousListening && !processing) {
-            handler.postDelayed(
-                { startListeningSession() },
-                900
-            )
+        if (
+            continuousListening &&
+            !processing &&
+            !ttsSpeaking
+        ) {
+            handler.removeCallbacksAndMessages(null)
+
+            handler.postDelayed({
+                startListeningSession()
+            }, 900)
         }
     }
 
@@ -525,10 +577,13 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             textToSpeech?.setOnUtteranceProgressListener(
                 object : UtteranceProgressListener() {
 
-                    override fun onStart(utteranceId: String?) {}
+                    override fun onStart(utteranceId: String?) {
+                        ttsSpeaking = true
+                    }
 
                     override fun onDone(utteranceId: String?) {
                         handler.post {
+                            ttsSpeaking = false
                             resumeListeningAfterReply()
                         }
                     }
@@ -536,11 +591,19 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     @Deprecated("Deprecated in Java")
                     override fun onError(utteranceId: String?) {
                         handler.post {
+                            ttsSpeaking = false
                             resumeListeningAfterReply()
                         }
                     }
                 }
             )
+
+            if (!ttsReady) {
+                status.text = "TTS LANGUAGE NOT AVAILABLE"
+            }
+        } else {
+            ttsReady = false
+            status.text = "TEXT TO SPEECH UNAVAILABLE"
         }
     }
 
@@ -561,13 +624,19 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             grantResults[0] == PackageManager.PERMISSION_GRANTED
         ) {
             requestMicrophonePermission()
+        } else if (requestCode == 100) {
+            status.text = "MICROPHONE PERMISSION DENIED"
         }
     }
 
     override fun onDestroy() {
         continuousListening = false
+        processing = false
+        ttsSpeaking = false
+
         handler.removeCallbacksAndMessages(null)
 
+        speechRecognizer?.cancel()
         speechRecognizer?.destroy()
         speechRecognizer = null
 
